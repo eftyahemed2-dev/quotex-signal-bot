@@ -1,11 +1,14 @@
 import pandas as pd
 from indicators import TechnicalIndicators
-from config import RSI_OVERSOLD, RSI_OVERBOUGHT, OTC_ASSET_PAIRS, ASSET_PAIR_CONFIG, SIGNAL_SETTINGS
+from config import (
+    RSI_OVERSOLD, RSI_OVERBOUGHT, OTC_ASSET_PAIRS, ASSET_PAIR_CONFIG, 
+    SIGNAL_SETTINGS, LOOP_SETTINGS, NUMBER_OF_CANDLES
+)
 from datetime import datetime
 import json
 
 class SignalPredictor:
-    """Predict buy/sell signals based on technical indicators"""
+    """Predict buy/sell signals based on technical indicators for a single pair"""
     
     @staticmethod
     def predict_signal(df):
@@ -27,14 +30,14 @@ class SignalPredictor:
         
         close_prices = pd.Series(df['close'].values)
         
-        # Calculate indicators
+        # Calculate all technical indicators
         rsi = TechnicalIndicators.calculate_rsi(close_prices)
         macd, signal_line, histogram = TechnicalIndicators.calculate_macd(close_prices)
         upper_bb, middle_bb, lower_bb = TechnicalIndicators.calculate_bollinger_bands(close_prices)
         momentum = TechnicalIndicators.calculate_momentum(close_prices)
         atr = TechnicalIndicators.calculate_atr(df)
         
-        # Get current price
+        # Get current and previous price
         current_price = df['close'].iloc[-1]
         previous_price = df['close'].iloc[-2] if len(df) > 1 else current_price
         
@@ -42,7 +45,7 @@ class SignalPredictor:
         buy_score = 0
         sell_score = 0
         
-        # RSI Analysis
+        # ========== RSI ANALYSIS ==========
         if rsi is not None:
             if rsi < RSI_OVERSOLD:
                 buy_score += 2
@@ -53,7 +56,7 @@ class SignalPredictor:
             else:
                 sell_score += 1
         
-        # MACD Analysis
+        # ========== MACD ANALYSIS ==========
         if macd is not None and signal_line is not None and histogram is not None:
             if histogram > 0 and macd > signal_line:
                 buy_score += 2
@@ -64,7 +67,7 @@ class SignalPredictor:
             else:
                 sell_score += 1
         
-        # Bollinger Bands Analysis
+        # ========== BOLLINGER BANDS ANALYSIS ==========
         if lower_bb is not None and upper_bb is not None:
             if current_price < lower_bb:
                 buy_score += 2
@@ -75,20 +78,20 @@ class SignalPredictor:
             else:
                 sell_score += 1
         
-        # Momentum Analysis
+        # ========== MOMENTUM ANALYSIS ==========
         if momentum is not None:
             if momentum > 0:
                 buy_score += 1
             else:
                 sell_score += 1
         
-        # Price Action Analysis
+        # ========== PRICE ACTION ANALYSIS ==========
         if current_price > previous_price:
             buy_score += 1
         else:
             sell_score += 1
         
-        # Determine signal and confidence
+        # Determine final signal and confidence
         total_score = buy_score + sell_score
         confidence = max(buy_score, sell_score) / total_score if total_score > 0 else 0
         
@@ -99,7 +102,7 @@ class SignalPredictor:
         else:
             signal = 'HOLD'
         
-        # Generate reason
+        # Generate reason for the signal
         reason = SignalPredictor._generate_reason(rsi, macd, histogram, current_price, lower_bb, upper_bb, momentum)
         
         return {
@@ -142,9 +145,9 @@ class SignalPredictor:
             reasons.append("MACD negative")
         
         if lower_bb is not None and price < lower_bb:
-            reasons.append("Price below lower Bollinger Band")
+            reasons.append("Price below lower BB")
         elif upper_bb is not None and price > upper_bb:
-            reasons.append("Price above upper Bollinger Band")
+            reasons.append("Price above upper BB")
         
         if momentum is not None and momentum > 0:
             reasons.append("Positive momentum")
@@ -155,17 +158,22 @@ class SignalPredictor:
 
 
 class MultiPairSignalPredictor:
-    """Predict signals for multiple OTC asset pairs"""
+    """
+    Predict signals for multiple OTC asset pairs.
+    Loops through all configured pairs and generates signals for each.
+    """
     
     def __init__(self):
         """Initialize the multi-pair predictor"""
         self.asset_pairs = OTC_ASSET_PAIRS
         self.pair_config = ASSET_PAIR_CONFIG
         self.results = []
+        self.errors = []
+        self.verbose = LOOP_SETTINGS.get('verbose_logging', True)
     
     def predict_all_pairs(self, data_loader):
         """
-        Generate signals for all configured OTC asset pairs.
+        Loop through all configured OTC asset pairs and generate signals.
         
         Args:
             data_loader: DataLoader instance for loading CSV data
@@ -174,23 +182,46 @@ class MultiPairSignalPredictor:
             List of signal results for all pairs
         """
         self.results = []
+        self.errors = []
         
-        print("=" * 80)
-        print("Multi-Pair OTC Signal Analysis")
-        print("=" * 80)
-        print(f"Analyzing {len(self.asset_pairs)} asset pairs...")
+        print("\n" + "="*80)
+        print("QUOTEX SIGNAL BOT - MULTI-PAIR OTC ANALYSIS")
+        print("="*80)
+        print(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Total Pairs to Analyze: {len(self.asset_pairs)}")
+        print("="*80)
         print()
         
-        for pair in self.asset_pairs:
-            pair_result = self._predict_pair(pair, data_loader)
-            if pair_result:
-                self.results.append(pair_result)
+        # Loop through each asset pair
+        for idx, pair in enumerate(self.asset_pairs, 1):
+            print(f"[{idx}/{len(self.asset_pairs)}] Processing: {pair}")
+            print("-" * 80)
+            
+            try:
+                pair_result = self._predict_pair(pair, data_loader)
+                if pair_result:
+                    self.results.append(pair_result)
+                    print(f"  ✓ Complete")
+                else:
+                    print(f"  ✗ Failed to generate signal")
+                    self.errors.append({'pair': pair, 'error': 'Failed to generate signal'})
+            except Exception as e:
+                error_msg = str(e)
+                print(f"  ✗ Error: {error_msg}")
+                self.errors.append({'pair': pair, 'error': error_msg})
+                
+                # Stop processing if configured
+                if LOOP_SETTINGS.get('stop_on_error', False):
+                    print("\n  Stopping processing due to error.")
+                    break
+            
+            print()
         
         return self.results
     
     def _predict_pair(self, pair, data_loader):
         """
-        Generate signal for a single asset pair.
+        Generate signal for a single OTC asset pair.
         
         Args:
             pair: Asset pair string (e.g., 'USD/ARS-OTC')
@@ -199,45 +230,42 @@ class MultiPairSignalPredictor:
         Returns:
             Dictionary with pair signal result or None if failed
         """
-        print(f"Processing: {pair}")
-        print("-" * 80)
-        
-        # Get pair configuration
+        # Validate pair configuration exists
         if pair not in self.pair_config:
-            print(f"  ✗ Pair configuration not found for {pair}")
-            print()
+            print(f"  Configuration not found for {pair}")
             return None
         
         config = self.pair_config[pair]
+        
+        # Skip disabled pairs
+        if not config.get('enabled', True):
+            print(f"  Pair disabled in configuration")
+            return None
+        
         csv_path = config['csv_path']
         description = config['description']
         
-        # Load data for this pair
+        # Load CSV data for this pair
         candle_data = data_loader.load_csv(csv_path)
-        
         if candle_data is None:
-            print(f"  ✗ Failed to load data from {csv_path}")
-            print()
+            print(f"  Cannot load CSV: {csv_path}")
             return None
         
-        # Validate data
+        # Validate candlestick data
         if not data_loader.validate_candles(candle_data):
-            print(f"  ✗ Invalid candlestick data for {pair}")
-            print()
+            print(f"  Invalid candlestick data")
             return None
         
-        # Get last 12 candles
-        last_candles = data_loader.get_last_n_candles(candle_data, 12)
-        
+        # Extract last 12 candles
+        last_candles = data_loader.get_last_n_candles(candle_data, NUMBER_OF_CANDLES)
         if last_candles is None or len(last_candles) == 0:
-            print(f"  ✗ No candle data available for {pair}")
-            print()
+            print(f"  No candle data available")
             return None
         
-        # Generate signal
+        # Generate signal for this pair
         signal_result = SignalPredictor.predict_signal(last_candles)
         
-        # Create pair result object
+        # Build comprehensive result object
         pair_result = {
             'timestamp': datetime.now().isoformat(),
             'pair': pair,
@@ -255,25 +283,25 @@ class MultiPairSignalPredictor:
             },
             'last_candle_timestamp': str(last_candles['timestamp'].iloc[-1]) if 'timestamp' in last_candles.columns else None,
             'price_action': {
-                'open': round(last_candles['open'].iloc[-1], 8),
-                'high': round(last_candles['high'].iloc[-1], 8),
-                'low': round(last_candles['low'].iloc[-1], 8),
-                'close': round(last_candles['close'].iloc[-1], 8),
+                'open': round(last_candles['open'].iloc[-1], config.get('decimal_places', 2)),
+                'high': round(last_candles['high'].iloc[-1], config.get('decimal_places', 2)),
+                'low': round(last_candles['low'].iloc[-1], config.get('decimal_places', 2)),
+                'close': round(last_candles['close'].iloc[-1], config.get('decimal_places', 2)),
                 'volume': round(last_candles['volume'].iloc[-1], 2)
             }
         }
         
-        # Display result
+        # Print result summary
         print(f"  Signal: {pair_result['signal']} (Confidence: {pair_result['confidence']}%)")
         print(f"  Reason: {pair_result['reason']}")
         print(f"  Price: {pair_result['price_action']['close']}")
-        print()
+        print(f"  Scores - Buy: {pair_result['scores']['buy']}, Sell: {pair_result['scores']['sell']}")
         
         return pair_result
     
     def get_summary(self):
         """
-        Get a summary of all signals.
+        Generate summary statistics for all analyzed pairs.
         
         Returns:
             Dictionary with signal summary
@@ -285,15 +313,17 @@ class MultiPairSignalPredictor:
                 'buy_signals': 0,
                 'sell_signals': 0,
                 'hold_signals': 0,
+                'errors': len(self.errors),
                 'strong_signals': [],
                 'weak_signals': []
             }
         
+        # Count signals
         buy_count = sum(1 for r in self.results if r['signal'] == 'BUY')
         sell_count = sum(1 for r in self.results if r['signal'] == 'SELL')
         hold_count = sum(1 for r in self.results if r['signal'] == 'HOLD')
         
-        # Filter strong signals (confidence >= SIGNAL_SETTINGS['min_confidence'])
+        # Filter by confidence threshold
         min_confidence = SIGNAL_SETTINGS.get('min_confidence', 60)
         strong_signals = [r for r in self.results if r['confidence'] >= min_confidence]
         weak_signals = [r for r in self.results if r['confidence'] < min_confidence]
@@ -305,12 +335,14 @@ class MultiPairSignalPredictor:
             'buy_signals': buy_count,
             'sell_signals': sell_count,
             'hold_signals': hold_count,
+            'errors': len(self.errors),
             'strong_signals': [
                 {
                     'pair': r['pair'],
                     'signal': r['signal'],
                     'confidence': r['confidence'],
-                    'reason': r['reason']
+                    'reason': r['reason'],
+                    'price': r['price_action']['close']
                 }
                 for r in strong_signals
             ],
@@ -318,7 +350,8 @@ class MultiPairSignalPredictor:
                 {
                     'pair': r['pair'],
                     'signal': r['signal'],
-                    'confidence': r['confidence']
+                    'confidence': r['confidence'],
+                    'price': r['price_action']['close']
                 }
                 for r in weak_signals
             ]
@@ -326,17 +359,21 @@ class MultiPairSignalPredictor:
     
     def export_results(self, output_file=None):
         """
-        Export results to JSON file.
+        Export all results and summary to JSON file.
         
         Args:
             output_file: Output file path (optional)
+            
+        Returns:
+            Path to the exported file
         """
         if output_file is None:
             output_file = f"otc_signals_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         
         export_data = {
             'summary': self.get_summary(),
-            'detailed_results': self.results
+            'detailed_results': self.results,
+            'errors': self.errors
         }
         
         with open(output_file, 'w') as f:
@@ -345,34 +382,68 @@ class MultiPairSignalPredictor:
         return output_file
     
     def print_summary(self):
-        """Print a formatted summary of all signals"""
+        """
+        Print formatted summary of all signals to console.
+        """
         summary = self.get_summary()
+        min_confidence = SIGNAL_SETTINGS.get('min_confidence', 60)
         
-        print("=" * 80)
+        print("\n" + "="*80)
         print("SIGNAL SUMMARY")
-        print("=" * 80)
+        print("="*80)
         print(f"Total Pairs:      {summary['total_pairs']}")
-        print(f"Analyzed Pairs:   {summary['analyzed_pairs']}")
+        print(f"Analyzed:         {summary['analyzed_pairs']}")
+        print(f"Errors:           {summary['errors']}")
         print(f"BUY Signals:      {summary['buy_signals']}")
         print(f"SELL Signals:     {summary['sell_signals']}")
         print(f"HOLD Signals:     {summary['hold_signals']}")
+        print("="*80)
         print()
         
-        min_confidence = SIGNAL_SETTINGS.get('min_confidence', 60)
-        
+        # Display strong signals
         if summary['strong_signals']:
             print(f"Strong Signals (Confidence >= {min_confidence}%):")
             print("-" * 80)
             for signal in summary['strong_signals']:
-                print(f"  {signal['pair']}: {signal['signal']} ({signal['confidence']}%)")
-                print(f"    {signal['reason']}")
+                print(f"  {signal['pair']:<15} | {signal['signal']:<5} | {signal['confidence']:>6.1f}% | Price: {signal['price']}")
+                print(f"    └─ {signal['reason']}")
             print()
         
+        # Display weak signals
         if summary['weak_signals']:
             print(f"Weak Signals (Confidence < {min_confidence}%):")
             print("-" * 80)
             for signal in summary['weak_signals']:
-                print(f"  {signal['pair']}: {signal['signal']} ({signal['confidence']}%)")
+                print(f"  {signal['pair']:<15} | {signal['signal']:<5} | {signal['confidence']:>6.1f}% | Price: {signal['price']}")
             print()
         
-        print("=" * 80)
+        # Display errors if any
+        if self.errors:
+            print("Errors:")
+            print("-" * 80)
+            for error in self.errors:
+                print(f"  {error['pair']}: {error['error']}")
+            print()
+        
+        print("="*80)
+    
+    def print_detailed_results(self):
+        """
+        Print detailed results for all pairs.
+        """
+        if not self.results:
+            print("No results to display.")
+            return
+        
+        print("\n" + "="*80)
+        print("DETAILED RESULTS")
+        print("="*80)
+        
+        for result in self.results:
+            print(f"\nPair: {result['pair']}")
+            print(f"Description: {result['description']}")
+            print(f"Signal: {result['signal']} ({result['confidence']}%)")
+            print(f"Reason: {result['reason']}")
+            print(f"Price: O:{result['price_action']['open']} H:{result['price_action']['high']} L:{result['price_action']['low']} C:{result['price_action']['close']}")
+            print(f"Indicators: RSI={result['indicators']['rsi']} MACD={result['indicators']['macd']} ATR={result['indicators']['atr']}")
+            print("-" * 80)
